@@ -5,14 +5,12 @@ Thank you for your interest in contributing! This document covers the architectu
 ## Architecture Overview
 
 ```
-SessionWatcher ─── (pause detected) ──> ContinueEngine ──> chat.submit (focus + submit prompt)
-     ^                                        |
-     | (watches JSONL files)                  v
-     |                                    Guardrails
-     |                                        |
+SessionWatcher ─── (pause detected) ──> ContinueEngine ──> open session editor
+     ^   (fs.watch + poll                    |                + chat.submit
+     |    + baseline)                         v
+     |                                    Guardrails (enabled + loop cap)
      +-- ActiveSessionResolver                |
-     |   (reads state.vscdb via sqlite3)      |
-     |                                        |
+     |   (reads state.vscdb via sqlite3)      v
      +───────── StatusBar (read-only view) ───+
 ```
 
@@ -20,24 +18,24 @@ SessionWatcher ─── (pause detected) ──> ContinueEngine ──> chat.su
 
 | Component | File | Purpose |
 |---|---|---|
-| **SessionWatcher** | `src/sessionWatcher.ts` | Watches chat session JSONL files on disk. Classifies the latest request's result and fires a pause event when the agent's turn ended or a continue button appeared, and a resume event when a newer request is in flight. |
-| **ActiveSessionResolver** | `src/activeSessionResolver.ts` | Reads `state.vscdb` (SQLite) to determine which chat session is currently active. Used as a safety gate before continuing — if the user switched sessions, the continue is skipped. |
-| **ContinueEngine** | `src/continueEngine.ts` | Manages continue cycles with exponential backoff. Sends a continue message by focusing the chat panel and submitting a follow-up prompt. Checks the active session before each attempt. |
-| **Guardrails** | `src/guardrails.ts` | Safety layer that prevents runaway continue loops. Enforces rate limits (15 continues/minute), minimum intervals (1 second), and cooldown periods (60 seconds after exhaustion). |
-| **StatusBar** | `src/statusBar.ts` | Read-only status bar item showing the current engine state (idle, waiting, continuing, cooldown, disabled). |
+| **SessionWatcher** | `src/sessionWatcher.ts` | Watches chat session JSONL files (workspace and empty-window storage) via a VS Code watcher plus a native `fs.watch` and a polling backstop. Baselines existing sessions on startup, then classifies the latest request's result and fires a pause event (turn ended or continue button) or a resume event (newer request in flight). |
+| **ActiveSessionResolver** | `src/activeSessionResolver.ts` | Reads `state.vscdb` (SQLite) to determine which chat session is currently active. Used as a best-effort gate: the continue is skipped only when a positively-different session is active. |
+| **ContinueEngine** | `src/continueEngine.ts` | Continues paused sessions indefinitely (no cooldown, no attempt cap). Opens the target session's editor to route the submit, restores the user's previous focus, and queues concurrent pauses (FIFO, deduped by session). |
+| **Guardrails** | `src/guardrails.ts` | Light safety layer: an enabled check plus a self-clearing loop-protection cap (30 continues/minute) so a pathological tight loop can't run away. No cooldown, no permanent cap. |
+| **StatusBar** | `src/statusBar.ts` | Read-only status bar item showing the current engine state (idle, waiting, continuing, disabled) and the queued-session count. |
 | **Logger** | `src/logger.ts` | Structured logging to a dedicated "Copilot Long Run" output channel. |
 | **Configuration** | `src/configuration.ts` | Live-reading configuration wrapper over VS Code settings. |
 
 ### Data Flow
 
-1. **Detection**: SessionWatcher reads a chat session JSONL file and looks at the latest request's `result`.
-2. **Classification**: The result is a continue opportunity when it completed with no error (turn ended), or when it carries a `copilotContinueOnError` confirmation button. `canceled` results and errors without a continue button are ignored.
-3. **Trigger creation**: A `ContinueTrigger` is created with the session ID and pause reason.
-4. **Guardrail check**: ContinueEngine consults Guardrails to verify a continue is permitted.
-5. **Backoff scheduling**: A timer is set using exponential backoff with jitter.
-6. **Active session check**: Before each attempt, the engine reads `state.vscdb` via sqlite3 to verify the paused session is still the active one.
-7. **Execution**: The continue focuses the chat panel and submits the continue message via `workbench.action.chat.submit`.
-8. **Resume**: The SessionWatcher detects when a paused session picks the work back up (a newer request appears) and cancels any active continue cycle.
+1. **Detection**: SessionWatcher rebuilds the final `requests[]` state from the JSONL entries and inspects the last request's `result`.
+2. **Classification**: The result is a continue opportunity when it completed with no error (turn ended), or when it carries a `copilotContinueOnError` confirmation button. `canceled` results and errors without a continue button are ignored. A freshness gate rejects stale completions; a per-session signature (including the turn's finish time) dedupes.
+3. **Trigger**: A `ContinueTrigger` (session id + reason) is created. If a continue is already running, it's queued (deduped by session).
+4. **Guardrail check**: ContinueEngine confirms the extension is enabled and the loop cap isn't momentarily hit (otherwise it re-queues and retries shortly).
+5. **Schedule**: A short fixed delay (with light jitter) is applied before submitting.
+6. **Target**: The engine opens the paused session's editor URI (`vscode-chat-session://local/<b64url(id)>`) so the submit lands in the right conversation; it skips only if `state.vscdb` reports a positively-different active session.
+7. **Submit**: The continue message is sent via `workbench.action.chat.submit`, then the user's previous tab is restored.
+8. **Repeat / resume**: The queue is drained for other paused sessions; when the agent starts its next turn the watcher fires a resume (cancelling any active continue), and the next turn's completion triggers the next continue.
 
 ## Challenges and How We Overcame Them
 
@@ -86,25 +84,23 @@ There is no public API for a third-party extension to trigger VS Code's internal
 
 ## Safety Guardrails
 
-The `Guardrails` class enforces multiple safety constraints:
+Continuation is indefinite by design — there is no cooldown and no attempt cap. The `Guardrails` class keeps only the minimum needed to stay safe:
 
 | Guardrail | Value | Purpose |
 |---|---|---|
-| Absolute rate limit | 15 continues per 60-second sliding window | Prevents runaway loops |
-| Minimum interval | 1,000 ms between any two attempts | Prevents rapid-fire continues |
-| Cycle cooldown | 60,000 ms after exhausting all attempts | Prevents immediate re-triggering |
 | Extension enabled check | Must be enabled in settings | User kill switch |
-| Active session check | Verifies paused session is still visible | Prevents continuing in wrong conversation |
+| Loop-protection cap | 30 continues per rolling 60-second window (self-clearing) | Prevents a pathological tight loop; never blocks permanently |
+| Active-session check | Skips only if a *different* session is positively active | Avoids continuing the wrong conversation |
 
-Backoff calculation uses exponential delay with jitter: `base * 2^(attempt-1) * jitter(0.8..1.2)`, clamped to `maxDelayMs`.
+The delay before a continue is a fixed base delay with light jitter (`baseDelayMs * jitter(0.85..1.15)`) — no exponential escalation.
 
 ## Known Limitations
 
 1. **Session file format is undocumented** — The JSONL format (`kind: 0/1/2`) was reverse-engineered. VS Code could change it without notice. The extension degrades gracefully if parsing fails (no crash, just no detection).
-2. **Cannot target a specific chat session** — `workbench.action.chat.submit` always goes to the focused chat widget. The `ActiveSessionResolver` mitigates this as a safety gate, not a targeting mechanism.
-3. **`sqlite3` dependency for active session check** — Used to read `state.vscdb`. Pre-installed on macOS and most Linux distros; may be missing on Windows or minimal containers. Without it, the check is skipped (graceful degradation).
+2. **Submitting requires focusing the target session** — `workbench.action.chat.submit` goes to the focused chat widget, so the engine opens the target session's editor before submitting and restores the previous tab afterward. A continue firing while you type in another chat editor can cause a brief focus flicker.
+3. **`sqlite3` dependency for the active-session check** — Used to read `state.vscdb`. Pre-installed on macOS and most Linux distros; may be missing on Windows or minimal containers. Without it, the check is skipped and the continue proceeds after focusing the target session.
 4. **Continuing adds a conversation turn** — Unlike the native continue button, submitting a message costs one additional LM turn.
-5. **Single continue cycle at a time** — If multiple sessions pause simultaneously, only the first triggers a cycle until it completes or is cancelled.
+5. **Continues run one at a time** — Concurrent pauses are queued and handled sequentially (never dropped).
 
 ## Development Setup
 
@@ -141,7 +137,13 @@ Tests use vitest. The `vscode` module is mocked (see `src/__mocks__/vscode.ts`) 
 npm run package
 ```
 
-This produces a `.vsix` file you can install locally via `code --install-extension <file>.vsix`.
+This produces a `.vsix` file you can install via `code --install-extension <file>.vsix`. To compile, package, and install in one step:
+
+```bash
+npm run install-local
+```
+
+(The `package` script pins `@vscode/vsce@3.2.1`; the latest version was blocked by a supply-chain cooldown.)
 
 ### Testing Locally
 
@@ -158,15 +160,15 @@ src/
   extension.ts                Entry point, wiring, command registration
   sessionWatcher.ts           Pause detection via chat session JSONL files
   activeSessionResolver.ts    Active session verification via state.vscdb (sqlite3)
-  continueEngine.ts           Continue cycle management with exponential backoff
-  guardrails.ts               Safety constraints and rate limiting
+  continueEngine.ts           Continues sessions indefinitely; session targeting + queue
+  guardrails.ts               Enabled check + loop-protection cap
   statusBar.ts                Status bar UI
-  logger.ts                   Output channel logging
+  logger.ts                   Output channel logging (with verbose mode)
   configuration.ts            Settings wrapper
   sessionWatcher.spec.ts      Tests: JSONL parsing and pause classification
   activeSessionResolver.spec.ts  Tests: sqlite3 integration and session matching
-  guardrails.spec.ts          Tests: safety guardrail logic
-  continueEngine.spec.ts      Tests: trigger factory methods
+  guardrails.spec.ts          Tests: guardrail logic
+  continueEngine.spec.ts      Tests: trigger factories + session URI builder
   __mocks__/
     vscode.ts                 Minimal vscode module mock for tests
 ```

@@ -21,26 +21,39 @@ This extension fixes that. It detects when the agent has paused and **automatica
 ## Features
 
 - **Automatic continue on pause** — Monitors chat session files on disk and detects when the agent's turn has ended or it's presenting a "continue" button, then sends a continue message
+- **Indefinite** — Keeps a session going for as many turns as it takes; there is no attempt cap and no cooldown
 - **Directive continue message** — Sends "Keep going until the task is fully complete." by default (configurable)
-- **Multi-window safe** — Each VS Code window only monitors its own workspace sessions; continues never leak across windows
-- **Multi-session safe** — Verifies the paused session is still the active one before sending, so it won't submit into the wrong conversation
-- **Exponential backoff with jitter** — Spaces attempts out to avoid hammering the API (2s → 4s → 8s → ...)
-- **Safety guardrails** — Hard rate limits (max 15 continues/minute), cooldown periods, and a kill switch to prevent runaway loops
-- **Status bar indicator** — Shows current state at a glance: idle, waiting, continuing, cooldown, or disabled
+- **Targets the right conversation** — Opens the paused session's own editor before submitting, then restores your previous tab, so the message lands in the correct session
+- **Multi-session safe** — Concurrent pauses are queued and handled one at a time; a queued session is never dropped
+- **Multi-window safe** — Each VS Code window only monitors its own sessions; continues never leak across windows
+- **Loop protection** — A generous, self-clearing rate cap prevents a runaway tight loop, plus a kill switch (enable/disable)
+- **Status bar indicator** — Shows current state at a glance: idle, waiting, continuing, or disabled
 - **Manual continue command** — Trigger a continue immediately with `Cmd+Shift+R` / `Ctrl+Shift+R`
+- **Verbose logging** — Optional detailed diagnostics in the output channel
 - **Zero configuration** — Works out of the box with sensible defaults
 
 ## How It Works
 
-1. VS Code writes Copilot chat sessions as JSONL files to disk. The extension watches these files for the latest request's result.
+1. VS Code writes Copilot chat sessions as JSONL files to disk. The extension watches these files (for both folder windows and empty windows) for the latest request's result.
 2. A session is considered **paused** (a continue opportunity) when either:
    - The latest request completed with no error — the agent's turn ended and it's idle; or
    - The latest result carries a continue / "Try Again" button — the agent is explicitly asking whether to keep going.
    
    User cancellations (pressing Stop) are never auto-continued.
-3. When a pause is detected, a continue cycle begins with exponential backoff.
-4. Before each attempt, the extension verifies the paused session is still the active one (to avoid submitting into the wrong conversation).
-5. Each attempt focuses the chat panel and submits the continue message in the same conversation.
+3. When a pause is detected, the extension waits a short delay, then opens the paused session's editor and submits the continue message into it.
+4. Your previously focused tab is restored afterward, so the focus change is brief.
+5. When the agent finishes its next turn, the cycle repeats — indefinitely — until the task is done or you stop it.
+
+## Install
+
+This extension isn't published to a marketplace; install it from source.
+
+```bash
+npm install
+npm run install-local
+```
+
+`install-local` compiles, packages a `.vsix`, and installs it into VS Code (`--force` overwrites any existing install). Reload or restart VS Code afterward. To uninstall: `code --uninstall-extension TheoGuidoux.vscode-copilot-long-run`.
 
 ## Commands
 
@@ -60,9 +73,8 @@ All settings are under `copilotLongRun.*` in VS Code Settings.
 |---|---|---|
 | `copilotLongRun.enabled` | `true` | Enable automatically continuing paused agent sessions |
 | `copilotLongRun.continueMessage` | `Keep going until the task is fully complete.` | The message sent to the agent when a pause is detected |
-| `copilotLongRun.maxContinues` | `3` | Maximum continue attempts per detected pause (1–10) |
-| `copilotLongRun.baseDelayMs` | `2000` | Base delay before the first continue in milliseconds (500–15,000) |
-| `copilotLongRun.maxDelayMs` | `30000` | Maximum backoff cap in milliseconds (5,000–120,000) |
+| `copilotLongRun.baseDelayMs` | `2000` | Delay before sending a continue after a pause is detected, in milliseconds (500–15,000) |
+| `copilotLongRun.verboseLogging` | `false` | Write detailed diagnostics at info level so they appear in the output channel without changing the log level |
 
 ## What Counts as a Pause?
 
@@ -77,25 +89,24 @@ The extension reads chat session JSONL files and classifies the latest request's
 
 ## Status Bar
 
-The status bar item (right side) shows the current state:
+The status bar item (right side) shows the current state (a `(+N)` suffix means N sessions are queued):
 
 | Icon | State | Meaning |
 |---|---|---|
 | $(check) Long Run | **Idle** | Monitoring normally, no pause detected |
-| $(clock) Continue 1/3 | **Waiting** | Backoff timer counting down before next attempt |
-| $(sync~spin) Continuing 1/3 | **Continuing** | Sending a continue right now |
-| $(warning) Long Run Cooldown | **Cooldown** | All continues exhausted, waiting before resuming |
+| $(clock) Continue | **Waiting** | Short delay before sending the continue |
+| $(sync~spin) Continuing | **Continuing** | Sending a continue right now |
 | $(x) Long Run: Off | **Disabled** | Extension is disabled |
 
 Click the status bar item to toggle the extension on/off.
 
 ## Limitations
 
-- **Continuing adds a message to the conversation** — There is no public API to press the built-in continue button. The extension submits a follow-up message instead, which adds one extra turn.
-- **Cannot target a specific session** — `workbench.action.chat.submit` always goes to the currently active chat widget. The extension mitigates this by checking which session is active before continuing, and skipping if the user switched away.
-- **Relies on VS Code internal file layout** — Session files are stored in `workspaceStorage/<hash>/chatSessions/`. If VS Code changes this layout, the extension will stop detecting pauses (but won't break anything — it degrades gracefully).
-- **Active session check requires `sqlite3` CLI** — On macOS and most Linux systems, `sqlite3` is pre-installed. Where it's missing, the active-session verification is skipped (continue proceeds without the safety check).
-- **Single continue at a time** — If multiple sessions pause in the same window, only the first triggers a continue cycle until it completes.
+- **Continuing adds a message to the conversation** — There is no public API to press the built-in continue button, so the extension submits a follow-up message instead, which adds one extra turn.
+- **Submitting requires focusing the target session** — `workbench.action.chat.submit` always goes to the focused chat widget. To route to the right session the extension briefly opens that session's editor, then restores your previous tab. If a continue fires while you're actively typing in another chat editor, you may see a brief focus flicker.
+- **Relies on VS Code internal file layout** — Session files are stored under `workspaceStorage/<hash>/chatSessions/` (folder windows) and `globalStorage/emptyWindowChatSessions/` (empty windows). If VS Code changes this layout, detection stops but nothing breaks — it degrades gracefully.
+- **Active-session check requires the `sqlite3` CLI** — On macOS and most Linux systems it's pre-installed. Where it's missing, the check is skipped and the continue proceeds after focusing the target session.
+- **Continues run one at a time** — Concurrent pauses are queued and handled sequentially.
 
 ## Requirements
 

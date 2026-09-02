@@ -7,9 +7,7 @@ import * as vscode from "vscode";
 export interface ResolvedConfig {
   enabled: boolean;
   continueMessage: string;
-  maxContinues: number;
   baseDelayMs: number;
-  maxDelayMs: number;
   verboseLogging: boolean;
 }
 
@@ -25,9 +23,7 @@ export function readConfig(): ResolvedConfig {
       "continueMessage",
       DEFAULT_CONTINUE_MESSAGE,
     ),
-    maxContinues: configuration.get<number>("maxContinues", 3),
     baseDelayMs: configuration.get<number>("baseDelayMs", 2000),
-    maxDelayMs: configuration.get<number>("maxDelayMs", 30000),
     verboseLogging: configuration.get<boolean>("verboseLogging", false),
   };
 }
