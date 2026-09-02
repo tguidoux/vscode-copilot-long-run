@@ -6,9 +6,7 @@ vi.mock("./configuration", () => ({
 	readConfig: vi.fn().mockReturnValue({
 		enabled: true,
 		continueMessage: "Keep going until the task is fully complete.",
-		maxContinues: 3,
 		baseDelayMs: 2000,
-		maxDelayMs: 30_000,
 		verboseLogging: false,
 	}),
 }));
@@ -21,9 +19,7 @@ function baseConfig() {
 	return {
 		enabled: true,
 		continueMessage: "Keep going until the task is fully complete.",
-		maxContinues: 3,
 		baseDelayMs: 2000,
-		maxDelayMs: 30_000,
 		verboseLogging: false,
 	};
 }

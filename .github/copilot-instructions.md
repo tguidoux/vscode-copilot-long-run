@@ -20,11 +20,14 @@ npx -y @vscode/vsce publish patch
 
 ## Packaging
 
-The extension has zero runtime npm dependencies. Use `--no-dependencies` if packaging separately:
+The extension has zero runtime npm dependencies. Use the scripts:
 
 ```bash
-npx -y @vscode/vsce package --no-dependencies
+npm run package        # vsce package --no-dependencies (vsce pinned to 3.2.1)
+npm run install-local  # compile + package + install into VS Code (--force)
 ```
+
+The `package` script pins `@vscode/vsce@3.2.1`; the latest version's transitive dependency was blocked by a supply-chain cooldown. If packaging directly, pass `--no-dependencies`.
 
 ## Build Artifacts
 

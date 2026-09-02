@@ -34,26 +34,12 @@
           "default": "Keep going until the task is fully complete.",
           "description": "The message sent to the agent to keep it working when a pause is detected"
         },
-        "copilotLongRun.maxContinues": {
-          "type": "number",
-          "default": 3,
-          "minimum": 1,
-          "maximum": 10,
-          "description": "Maximum number of continue attempts per detected pause"
-        },
         "copilotLongRun.baseDelayMs": {
           "type": "number",
           "default": 2000,
           "minimum": 500,
           "maximum": 15000,
-          "description": "Base delay in milliseconds before the first continue attempt (doubles on each subsequent attempt)"
-        },
-        "copilotLongRun.maxDelayMs": {
-          "type": "number",
-          "default": 30000,
-          "minimum": 5000,
-          "maximum": 120000,
-          "description": "Maximum delay cap in milliseconds for exponential backoff"
+          "description": "Delay in milliseconds before sending a continue after a pause is detected"
         },
         "copilotLongRun.verboseLogging": {
           "type": "boolean",
