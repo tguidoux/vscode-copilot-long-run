@@ -1,9 +1,5 @@
 # Copilot Long Run
 
-<p align="center">
-  <img src="assets/icon.png" alt="Copilot Long Run logo" width="128">
-</p>
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Keeps GitHub Copilot agent sessions going.** When the agent pauses — its turn ends, or it stops to ask whether it should keep iterating — this extension automatically sends a continue message so a long-running task finishes while you're away.
